@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>CopyMyVoice · 中文 → 你的音色说英语</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: #0f1115; color: #e4e6eb; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; padding: 24px;
+  }
+  h1 { font-size: 28px; margin-bottom: 8px; color: #fff; }
+  .sub { color: #8a8d98; margin-bottom: 24px; font-size: 14px; }
+  .card {
+    background: #1a1d24; border: 1px solid #2a2e38; border-radius: 12px;
+    padding: 24px; width: 100%; max-width: 720px; margin-bottom: 16px;
+  }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+  .tab {
+    padding: 10px 20px; background: #25293299; border: 1px solid #2a2e38;
+    border-radius: 8px; cursor: pointer; color: #b0b3bb; font-size: 14px;
+    transition: all 0.2s;
+  }
+  .tab.active { background: #4f8cff; color: #fff; border-color: #4f8cff; }
+  .tab:hover { background: #2a2e38; }
+  .tab.active:hover { background: #4f8cff; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  button.primary {
+    background: #4f8cff; color: #fff; border: none; padding: 12px 28px;
+    border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: 500;
+    margin-top: 16px; transition: all 0.2s;
+  }
+  button.primary:hover { background: #3d7ce0; }
+  button.primary:disabled { background: #3a3d47; cursor: not-allowed; color: #6a6d77; }
+  button.secondary {
+    background: #2a2e38; color: #e4e6eb; border: none; padding: 10px 20px;
+    border-radius: 8px; cursor: pointer; font-size: 14px;
+  }
+  button.secondary:hover { background: #353941; }
+  audio { width: 100%; margin-top: 12px; }
+  .status { padding: 12px; background: #25293266; border-radius: 8px; margin-top: 12px; font-size: 14px; min-height: 22px; }
+  .status.success { background: #1a4d2e44; color: #6ce096; }
+  .status.error { background: #4d1a1a44; color: #ff6b6b; }
+  .status.working { background: #4d3a1a44; color: #ffba6b; }
+  input[type="file"] { display: none; }
+  .file-label {
+    display: inline-block; padding: 12px 20px; background: #2a2e38;
+    border: 1px dashed #4a4e58; border-radius: 8px; cursor: pointer;
+    text-align: center; width: 100%; transition: all 0.2s;
+  }
+  .file-label:hover { background: #353941; }
+  .result-box {
+    background: #25293266; padding: 12px; border-radius: 8px; margin-top: 12px;
+    border-left: 3px solid #4f8cff;
+  }
+  .result-box .label { color: #8a8d98; font-size: 12px; margin-bottom: 4px; }
+  .result-box .val { color: #e4e6eb; font-size: 14px; line-height: 1.5; }
+  .tips { color: #6a6d77; font-size: 13px; margin-top: 16px; line-height: 1.6; }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px; border: 2px solid #4a4e58;
+    border-top-color: #6ce096; border-radius: 50%; animation: spin 1s linear infinite;
+    margin-right: 6px; vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .rec-indicator {
+    display: inline-block; width: 10px; height: 10px; background: #f44;
+    border-radius: 50%; margin-right: 6px; animation: pulse 1s infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+<h1>🎙️ CopyMyVoice</h1>
+<p class="sub">中文 → 你的音色说英语</p>
+
+<div class="card">
+  <div class="tabs">
+    <div class="tab active" data-tab="mic">🎤 麦克风录音</div>
+    <div class="tab" data-tab="upload">📁 上传音频</div>
+  </div>
+
+  <div class="panel active" id="mic-panel">
+    <p class="tips">点开始录音后说话，再点停止。10 秒以上效果更好。</p>
+    <div style="margin-top: 12px;">
+      <button class="secondary" id="rec-btn">开始录音</button>
+      <span id="rec-status" style="margin-left: 12px; color: #8a8d98;"></span>
+    </div>
+    <audio id="mic-preview" controls style="display:none"></audio>
+    <button class="primary" id="mic-go" disabled>开始转换</button>
+  </div>
+
+  <div class="panel" id="upload-panel">
+    <p class="tips">支持 wav / mp3 / m4a / flac · 最大 50 MB</p>
+    <label class="file-label" for="file-input" id="file-label">点击选择文件</label>
+    <input type="file" id="file-input" accept="audio/*,.m4a,.mp3,.wav,.flac">
+    <div id="file-info" style="margin-top: 8px; color: #8a8d98; font-size: 13px;"></div>
+    <audio id="file-preview" controls style="display:none"></audio>
+    <button class="primary" id="file-go" disabled>开始转换</button>
+  </div>
+
+  <div class="status" id="status">等待开始...</div>
+</div>
+
+<div class="card" id="result-card" style="display:none">
+  <h3 style="margin-bottom: 12px;">✅ 完成</h3>
+  <div class="result-box">
+    <div class="label">中文识别</div>
+    <div class="val" id="zh-text"></div>
+  </div>
+  <div class="result-box">
+    <div class="label">英文翻译</div>
+    <div class="val" id="en-text"></div>
+  </div>
+  <div class="result-box">
+    <div class="label">输出音频</div>
+    <audio id="out-audio" controls style="margin-top: 8px;"></audio>
+    <div class="val" id="out-info" style="margin-top: 8px; font-size: 12px; color: #8a8d98;"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let mediaRecorder = null;
+let audioBlob = null;
+let audioFile = null;
+let recordStartTime = 0;
+let recTimer = null;
+
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('mic-panel').classList.toggle('active', t.dataset.tab === 'mic');
+    $('upload-panel').classList.toggle('active', t.dataset.tab === 'upload');
+  });
+});
+
+function setStatus(msg, type='') {
+  $('status').className = 'status ' + type;
+  $('status').innerHTML = msg;
+}
+
+// --- Recording ---
+$('rec-btn').addEventListener('click', async () => {
+  if (!mediaRecorder) {
+    // Start
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      const chunks = [];
+      mediaRecorder.ondataavailable = e => chunks.push(e.data);
+      mediaRecorder.onstop = () => {
+        audioBlob = new Blob(chunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(audioBlob);
+        $('mic-preview').src = url;
+        $('mic-preview').style.display = 'block';
+        $('mic-go').disabled = false;
+        stream.getTracks().forEach(t => t.stop());
+        $('rec-status').textContent = '';
+      };
+      mediaRecorder.start();
+      recordStartTime = Date.now();
+      $('rec-btn').textContent = '停止录音';
+      $('rec-status').innerHTML = '<span class="rec-indicator"></span>录音中...';
+      recTimer = setInterval(() => {
+        const s = Math.floor((Date.now() - recordStartTime) / 1000);
+        $('rec-status').innerHTML = `<span class="rec-indicator"></span>录音中... ${s}s`;
+      }, 200);
+    } catch (e) {
+      setStatus('麦克风权限被拒绝: ' + e.message, 'error');
+    }
+  } else {
+    // Stop
+    clearInterval(recTimer);
+    mediaRecorder.stop();
+    mediaRecorder = null;
+    $('rec-btn').textContent = '开始录音';
+  }
+});
+
+$('mic-go').addEventListener('click', async () => {
+  if (!audioBlob) return;
+  $('mic-go').disabled = true;
+  setStatus('<span class="spinner"></span>处理中... 这通常需要 30-90 秒', 'working');
+  try {
+    const fd = new FormData();
+    fd.append('audio', audioBlob, 'recording.webm');
+    const r = await fetch('/api/process', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    showResult(data);
+  } catch (e) {
+    setStatus('❌ ' + e.message, 'error');
+  } finally {
+    $('mic-go').disabled = false;
+  }
+});
+
+// --- File upload ---
+$('file-input').addEventListener('change', e => {
+  audioFile = e.target.files[0];
+  if (!audioFile) return;
+  $('file-label').textContent = audioFile.name;
+  $('file-info').textContent = `${audioFile.name} · ${(audioFile.size/1024/1024).toFixed(2)} MB`;
+  $('file-preview').src = URL.createObjectURL(audioFile);
+  $('file-preview').style.display = 'block';
+  $('file-go').disabled = false;
+});
+
+$('file-go').addEventListener('click', async () => {
+  if (!audioFile) return;
+  $('file-go').disabled = true;
+  setStatus('<span class="spinner"></span>处理中... 这通常需要 30-90 秒', 'working');
+  try {
+    const fd = new FormData();
+    fd.append('audio', audioFile, audioFile.name);
+    const r = await fetch('/api/process', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    showResult(data);
+  } catch (e) {
+    setStatus('❌ ' + e.message, 'error');
+  } finally {
+    $('file-go').disabled = false;
+  }
+});
+
+function showResult(data) {
+  setStatus('✅ 完成 · 用时 ' + data.duration + ' 秒', 'success');
+  $('zh-text').textContent = data.zh;
+  $('en-text').textContent = data.en;
+  $('out-audio').src = data.out_url + '?t=' + Date.now();
+  $('out-info').textContent = data.out_info;
+  $('result-card').style.display = 'block';
+  $('result-card').scrollIntoView({ behavior: 'smooth' });
+}
+</script>
+</body>
+</html>

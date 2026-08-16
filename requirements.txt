@@ -1,0 +1,21 @@
+# Core audio
+numpy>=1.24,<2.0
+soundfile>=0.12
+librosa>=0.10
+sounddevice>=0.4.6
+scipy>=1.11
+
+# ASR (Chinese)
+faster-whisper>=1.0.0
+
+# Translation (offline fallback)
+argostranslate>=1.9.0
+requests>=2.31
+
+# TTS + voice cloning
+# F5-TTS — modern zero-shot voice cloning, cross-lingual, supports Python 3.12
+f5-tts>=1.1.0
+
+# Optional: better quality time-stretching (pitch-preserving).
+# If install fails, the pipeline falls back to librosa automatically.
+pyrubberband>=0.4.0

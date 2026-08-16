@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual env
+.venv/
+venv/
+env/
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Models (large binaries — users download on first run)
+models/
+hf_cache/
+.cache/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Runtime outputs
+output/
+tmp_uploads/
+uploads/
+
+# Audio files (test inputs/outputs)
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.opus
+*.ogg
+
+# Logs
+*.log
+*.err
+
+# OS-specific scripts
+*.ps1
+*.bat
+!copymyvoice.bat
