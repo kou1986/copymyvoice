@@ -20,6 +20,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Force UTF-8 stdout on Windows so print() doesn't fail on Chinese chars
+# when the terminal codepage is GBK (e.g. Windows 10/11 Chinese locale).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ROOT = Path(__file__).parent.resolve()
 WEB_DIR = ROOT / "web"
 OUTPUT_DIR = ROOT / "output"
@@ -58,7 +66,7 @@ def _load_pipeline():
     return _pipeline
 
 
-def _do_process(audio_path: str) -> dict:
+def _do_process(audio_path: str, quality_mode: bool = True) -> dict:
     """Run the full pipeline on an audio file. Returns a dict suitable for JSON."""
     t0 = time.time()
     p = _load_pipeline()
@@ -68,6 +76,114 @@ def _do_process(audio_path: str) -> dict:
     print(f"[server] loaded {len(audio)/sr:.2f}s @ {sr}Hz")
 
     # 2. ASR full audio + extract ref_text (first 6s) in one pass
+    zh, ref_zh, orig_dur = _run_asr(p, audio, sr)
+
+    # 3. Translate + 4. TTS + 5. Stretch + 6. Save
+    return _transcribe_synthesize_save(p, audio, sr, zh, ref_zh, orig_dur, t0,
+                                       quality_mode=quality_mode)
+
+
+def _do_regenerate(audio_path: str, zh_text: str, quality_mode: bool = True) -> dict:
+    """Skip ASR — use the user-edited Chinese text, re-translate and re-synthesize."""
+    t0 = time.time()
+    p = _load_pipeline()
+
+    # 1. Load
+    audio, sr = p["load_audio"](audio_path, target_sr=24000)
+    print(f"[server] loaded {len(audio)/sr:.2f}s @ {sr}Hz (for regenerate)")
+
+    # 2. Get ref_text from the first 6s of audio (skip full ASR)
+    REF = 6.0
+    ref_samples = min(len(audio), int(REF * sr))
+    ref_audio_only = audio[:ref_samples]
+    asr_result = p["transcribe_chinese"](ref_audio_only, sr, ref_duration=0.0)
+    ref_zh = asr_result[0] if asr_result and asr_result[0].strip() else zh_text
+    orig_dur = len(audio) / sr
+
+    if not zh_text.strip():
+        raise RuntimeError("中文文本为空")
+
+    print(f"[server] regenerate with edited Chinese: {zh_text[:60]}...")
+
+    # 3-6. Translate + TTS + Stretch + Save
+    return _transcribe_synthesize_save(p, audio, sr, zh_text, ref_zh, orig_dur, t0,
+                                       quality_mode=quality_mode)
+
+
+def _do_translate_only(audio_path: str, zh_text: str) -> dict:
+    """Just translate Chinese → English. No TTS. Returns (zh, en)."""
+    t0 = time.time()
+    p = _load_pipeline()
+    if not zh_text.strip():
+        raise RuntimeError("中文文本为空")
+    en = p["translate_to_english"](zh_text)
+    if not en.strip():
+        raise RuntimeError("Translation failed")
+    print(f"[server] translate_only: {zh_text[:40]}... -> {en[:40]}...")
+    return {
+        "zh": zh_text,
+        "en": en,
+        "duration": f"{time.time()-t0:.1f}",
+    }
+
+
+def _do_synthesize_only(audio_path: str, en_text: str, quality_mode: bool = True) -> dict:
+    """Just run TTS on the provided English text. No translation. Returns (en, wav)."""
+    t0 = time.time()
+    p = _load_pipeline()
+
+    # Load audio + get ref_text from first 6s
+    audio, sr = p["load_audio"](audio_path, target_sr=24000)
+    REF = 6.0
+    ref_samples = min(len(audio), int(REF * sr))
+    ref_audio_only = audio[:ref_samples]
+    asr_result = p["transcribe_chinese"](ref_audio_only, sr, ref_duration=0.0)
+    ref_zh = asr_result[0] if asr_result and asr_result[0].strip() else en_text
+    orig_dur = len(audio) / sr
+
+    if not en_text.strip():
+        raise RuntimeError("英文文本为空")
+
+    print(f"[server] synthesize_only: {en_text[:40]}...")
+
+    # Run TTS + stretch + save
+    REF = 6.0
+    ref_samples = min(len(audio), int(REF * sr))
+    ref_audio = audio[:ref_samples]
+    target_total = orig_dur
+
+    eng, tts_sr = p["synthesize_english"](
+        english_text=en_text,
+        reference_audio=ref_audio,
+        reference_sr=sr,
+        ref_text=ref_zh,
+        fix_duration=target_total,
+        quality_mode=quality_mode,
+    )
+    cur = len(eng) / tts_sr
+    if tts_sr != sr:
+        import librosa
+        eng = librosa.resample(eng, orig_sr=tts_sr, target_sr=sr)
+        tts_sr = sr
+        cur = len(eng) / tts_sr
+
+    final = p["time_stretch_to_duration"](eng, orig_dur, cur, sample_rate=tts_sr)
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_name = f"cloned_{ts}.wav"
+    out_path = OUTPUT_DIR / out_name
+    p["save_audio"](final, str(out_path), sample_rate=tts_sr)
+
+    return {
+        "en": en_text,
+        "out_url": f"/output/{out_name}",
+        "out_info": f"{len(final)/tts_sr:.2f} 秒 · {tts_sr} Hz · {out_path.name}",
+        "duration": f"{time.time()-t0:.1f}",
+    }
+
+
+def _run_asr(p, audio, sr):
+    """Run ASR on the full audio. Returns (zh, ref_zh, orig_dur)."""
     REF = 6.0
     asr_result = p["transcribe_chinese"](audio, sr, ref_duration=REF)
     if len(asr_result) == 4:
@@ -77,20 +193,26 @@ def _do_process(audio_path: str) -> dict:
         ref_zh = zh
     if not zh.strip():
         raise RuntimeError("No Chinese detected in audio")
+    return zh, ref_zh, orig_dur
 
+
+def _transcribe_synthesize_save(p, audio, sr, zh, ref_zh, orig_dur, t0,
+                                quality_mode: bool = True):
+    """Translate + TTS + time-stretch + save. Returns JSON-ready dict."""
     # 3. Translate
     en = p["translate_to_english"](zh)
     if not en.strip():
         raise RuntimeError("Translation failed")
 
     # 4. TTS — use ONLY first 6s as voice prompt
+    REF = 6.0
     ref_samples = min(len(audio), int(REF * sr))
     ref_audio = audio[:ref_samples]
 
     # fix_duration: avoid F5-TTS chunking by passing target total duration
     # (ref + generated). This forces single-pass generation, which doesn't
     # leak ref_text mid-output.
-    target_total = orig_dur  # entire original audio length
+    target_total = orig_dur
 
     eng, tts_sr = p["synthesize_english"](
         english_text=en,
@@ -98,6 +220,7 @@ def _do_process(audio_path: str) -> dict:
         reference_sr=sr,
         ref_text=ref_zh,
         fix_duration=target_total,
+        quality_mode=quality_mode,
     )
     cur = len(eng) / tts_sr
     if tts_sr != sr:
@@ -175,63 +298,91 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND)
 
-    def do_POST(self):
-        url = urlparse(self.path)
-        if url.path != "/api/process":
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-
-        # Parse multipart
+    def _parse_multipart(self):
+        """Parse a multipart/form-data body. Returns (audio_bytes, filename, form_fields)."""
         ctype = self.headers.get("Content-Type", "")
         m = re.match(r"multipart/form-data;\s*boundary=(.+)", ctype)
         if not m:
-            self._send_json({"error": "Expected multipart/form-data"}, status=400)
-            return
+            return None, None, {}
         boundary = ("--" + m.group(1)).encode("utf-8")
 
-        # Read full body
         clen = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(clen)
 
-        # Find file part
-        # Naive parser: split by boundary, look for the part with name="audio"
-        parts = body.split(boundary)
         audio_bytes = None
         filename = "upload.bin"
-        for part in parts:
-            if b'name="audio"' not in part:
-                continue
-            # part looks like: \r\n\r\n<headers>\r\n\r\n<content>\r\n
-            header_end = part.find(b"\r\n\r\n")
-            if header_end < 0:
-                continue
-            headers = part[:header_end].decode("utf-8", errors="ignore")
-            content = part[header_end + 4:]
-            # Strip trailing \r\n
-            if content.endswith(b"\r\n"):
-                content = content[:-2]
-            # Try to extract filename
-            fnmatch = re.search(r'filename="([^"]+)"', headers)
-            if fnmatch:
-                filename = fnmatch.group(1)
-            audio_bytes = content
-            break
+        form_fields: dict[str, str] = {}
+        for part in body.split(boundary):
+            if b'name="audio"' in part:
+                header_end = part.find(b"\r\n\r\n")
+                if header_end < 0:
+                    continue
+                headers = part[:header_end].decode("utf-8", errors="ignore")
+                content = part[header_end + 4:]
+                if content.endswith(b"\r\n"):
+                    content = content[:-2]
+                fnmatch = re.search(r'filename="([^"]+)"', headers)
+                if fnmatch:
+                    filename = fnmatch.group(1)
+                audio_bytes = content
+            else:
+                # Generic form field (no filename)
+                header_end = part.find(b"\r\n\r\n")
+                if header_end < 0:
+                    continue
+                headers = part[:header_end].decode("utf-8", errors="ignore")
+                content = part[header_end + 4:]
+                if content.endswith(b"\r\n"):
+                    content = content[:-2]
+                nm = re.search(r'name="([^"]+)"', headers)
+                if nm:
+                    form_fields[nm.group(1)] = content.decode("utf-8", errors="ignore")
+        return audio_bytes, filename, form_fields
 
+    def do_POST(self):
+        url = urlparse(self.path)
+        if url.path not in ("/api/process", "/api/regenerate",
+                            "/api/translate", "/api/synthesize"):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        audio_bytes, filename, form = self._parse_multipart()
         if not audio_bytes:
             self._send_json({"error": "No audio file in request"}, status=400)
             return
+
+        quality_mode = form.get("quality_mode", "true").lower() != "false"
 
         # Save to temp
         tmp_ext = Path(filename).suffix or ".bin"
         tmp_path = TMP_DIR / f"upload_{int(time.time()*1000)}{tmp_ext}"
         tmp_path.write_bytes(audio_bytes)
-        print(f"[server] received {filename} ({len(audio_bytes)} bytes) -> {tmp_path}")
+        print(f"[server] received {filename} ({len(audio_bytes)} bytes) -> {tmp_path} "
+              f"({url.path}, quality_mode={quality_mode})")
 
         try:
-            # Serialize: only one pipeline run at a time (GPU contention)
             with _pipeline_lock:
-                print(f"[server] {threading.current_thread().name} acquired lock, processing...")
-                result = _do_process(str(tmp_path))
+                print(f"[server] {threading.current_thread().name} acquired lock, "
+                      f"processing ({url.path})...")
+                if url.path == "/api/process":
+                    result = _do_process(str(tmp_path), quality_mode=quality_mode)
+                elif url.path == "/api/regenerate":
+                    edited_zh = form.get("zh_text", "").strip()
+                    if not edited_zh:
+                        raise RuntimeError("缺少 zh_text 字段")
+                    result = _do_regenerate(str(tmp_path), edited_zh,
+                                            quality_mode=quality_mode)
+                elif url.path == "/api/translate":
+                    edited_zh = form.get("zh_text", "").strip()
+                    if not edited_zh:
+                        raise RuntimeError("缺少 zh_text 字段")
+                    result = _do_translate_only(str(tmp_path), edited_zh)
+                else:  # /api/synthesize
+                    en_text = form.get("en_text", "").strip()
+                    if not en_text:
+                        raise RuntimeError("缺少 en_text 字段")
+                    result = _do_synthesize_only(str(tmp_path), en_text,
+                                                  quality_mode=quality_mode)
                 print(f"[server] {threading.current_thread().name} done in {result['duration']}s")
             self._send_json(result)
         except Exception as e:

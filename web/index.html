@@ -57,6 +57,18 @@
   }
   .result-box .label { color: #8a8d98; font-size: 12px; margin-bottom: 4px; }
   .result-box .val { color: #e4e6eb; font-size: 14px; line-height: 1.5; }
+  .result-box textarea {
+    width: 100%; min-height: 70px; resize: vertical;
+    background: #1a1d24; color: #e4e6eb; border: 1px solid #2a2e38;
+    border-radius: 6px; padding: 8px; font-family: inherit; font-size: 14px;
+    line-height: 1.5;
+  }
+  .result-box textarea:focus { outline: none; border-color: #4f8cff; }
+  .regen-row {
+    display: flex; gap: 8px; align-items: center; margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .regen-row .hint { color: #8a8d98; font-size: 12px; }
   .tips { color: #6a6d77; font-size: 13px; margin-top: 16px; line-height: 1.6; }
   .spinner {
     display: inline-block; width: 14px; height: 14px; border: 2px solid #4a4e58;
@@ -106,12 +118,20 @@
 <div class="card" id="result-card" style="display:none">
   <h3 style="margin-bottom: 12px;">✅ 完成</h3>
   <div class="result-box">
-    <div class="label">中文识别</div>
-    <div class="val" id="zh-text"></div>
+    <div class="label">中文识别（可编辑）</div>
+    <textarea id="zh-text" spellcheck="false"></textarea>
+    <div class="regen-row">
+      <button class="primary" id="translate-btn" style="margin-top: 0;">🌐 翻译</button>
+      <span class="hint">改完中文点这个，看翻译结果对不对</span>
+    </div>
   </div>
   <div class="result-box">
-    <div class="label">英文翻译</div>
-    <div class="val" id="en-text"></div>
+    <div class="label">英文翻译（可编辑）</div>
+    <textarea id="en-text" spellcheck="false" style="min-height: 50px;"></textarea>
+    <div class="regen-row">
+      <button class="primary" id="synth-btn" style="margin-top: 0;">🎙️ 生成语音</button>
+      <span class="hint">英文不对就改，然后点这里生成（不重做翻译）</span>
+    </div>
   </div>
   <div class="result-box">
     <div class="label">输出音频</div>
@@ -230,13 +250,72 @@ $('file-go').addEventListener('click', async () => {
 
 function showResult(data) {
   setStatus('✅ 完成 · 用时 ' + data.duration + ' 秒', 'success');
-  $('zh-text').textContent = data.zh;
-  $('en-text').textContent = data.en;
-  $('out-audio').src = data.out_url + '?t=' + Date.now();
-  $('out-info').textContent = data.out_info;
+  if (data.zh !== undefined) $('zh-text').value = data.zh;
+  if (data.en !== undefined) $('en-text').value = data.en;
+  if (data.out_url) {
+    $('out-audio').src = data.out_url + '?t=' + Date.now();
+    $('out-info').textContent = data.out_info;
+    $('out-audio').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
   $('result-card').style.display = 'block';
   $('result-card').scrollIntoView({ behavior: 'smooth' });
 }
+
+async function _getAudio() {
+  if (audioBlob) return audioBlob;             // mic recording
+  if (audioFile) return audioFile;             // uploaded file
+  throw new Error('没找到原音频');
+}
+
+$('translate-btn').addEventListener('click', async () => {
+  const editedZh = $('zh-text').value.trim();
+  if (!editedZh) {
+    setStatus('❌ 中文文本不能为空', 'error');
+    return;
+  }
+  $('translate-btn').disabled = true;
+  setStatus('<span class="spinner"></span>翻译中...', 'working');
+  try {
+    const audio = await _getAudio();
+    const fd = new FormData();
+    fd.append('audio', audio, audio.name || 'rec.webm');
+    fd.append('zh_text', editedZh);
+    const r = await fetch('/api/translate', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    $('en-text').value = data.en;
+    setStatus('✅ 翻译完成 · 用时 ' + data.duration + ' 秒 · '
+              + '英文不对就改，然后点「生成语音」', 'success');
+  } catch (e) {
+    setStatus('❌ ' + e.message, 'error');
+  } finally {
+    $('translate-btn').disabled = false;
+  }
+});
+
+$('synth-btn').addEventListener('click', async () => {
+  const enText = $('en-text').value.trim();
+  if (!enText) {
+    setStatus('❌ 英文文本不能为空', 'error');
+    return;
+  }
+  $('synth-btn').disabled = true;
+  setStatus('<span class="spinner"></span>生成语音中...（通常 30-60 秒）', 'working');
+  try {
+    const audio = await _getAudio();
+    const fd = new FormData();
+    fd.append('audio', audio, audio.name || 'rec.webm');
+    fd.append('en_text', enText);
+    const r = await fetch('/api/synthesize', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    showResult(data);
+  } catch (e) {
+    setStatus('❌ ' + e.message, 'error');
+  } finally {
+    $('synth-btn').disabled = false;
+  }
+});
 </script>
 </body>
 </html>

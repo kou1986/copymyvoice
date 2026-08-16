@@ -92,6 +92,10 @@ scoop install rubberband
 双击 `copymyvoice.bat`，浏览器自动开 http://127.0.0.1:7860。
 
 - 上传 wav / m4a / mp3 文件，**或** 按"录音"按钮录中文
+- 首次跑完后，结果区会显示：中文识别（可编辑）、英文翻译（可编辑）、输出音频
+- **两步校验**：
+  1. 改完中文 → 点「🌐 翻译」，看英文翻译对不对
+  2. 英文不对就改 → 点「🎙️ 生成语音」（跳过翻译直接合成）
 - 等 10–60 秒（看音频长度），输出 wav 自动保存在 `output/`
 
 ### 3.2 命令行
@@ -132,8 +136,11 @@ A: `steps.py` 顶部的 `_preload_cudnn()` 已经处理过 PATH；如果还报�
 **Q: 输出有中英混杂？**
 A: 这是 F5-TTS 跨语言+短 ref_text 的已知问题。代码里通过 `fix_duration` 参数强制单次生成（不切段）解决。F5-TTS 单次最长 30s，输入超 30s 需要先拆分。
 
+**Q: 输出英文有中国口音 / 中文音素漏出？**
+A: 默认 `quality_mode=True` 会把 ref_text（中文）翻译成英文后再喂给 F5-TTS，避免中文 pinyin 渗到英文输出。如果想用纯中文 ref_text，在 UI 关掉 quality_mode（API 加 `quality_mode=false`）。
+
 **Q: 输出英文有奇怪的信噪比 / 跟原声不像？**
-A: 录 10–30 秒安静、自然语速的中文给 F5-TTS 作 voice prompt。太短 / 太嘈杂 / 太夸张的语气都会失真。
+A: 录 10–30 秒安静、自然语速的中文给 F5-TTS 作 voice prompt。太短 / 太嘈杂 / 太夸张的语气都会失真。`quality_mode=True` 还会做 preemphasis 高通滤波 + 峰值归一化，让声音更清晰。
 
 **Q: 想换翻译模型？**
 A: 改 `steps.py` 里 `_translate_ollama` 的 `model` 列表，比如换成 `qwen2.5:14b` 或 `llama3.1:8b`。

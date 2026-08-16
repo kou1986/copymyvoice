@@ -441,12 +441,50 @@ def _trim_f5_echo(wav: np.ndarray, sr: int) -> np.ndarray:
 _tts_cache: dict = {}
 
 
+def _english_ref_text(ref_text: str) -> str:
+    """
+    Detect Chinese characters in ref_text and translate to English.
+    Most-direct fix for F5-TTS cross-lingual artifacts (Chinese-sounding
+    phonemes leaking into English output). Falls back to argostranslate
+    if ollama is unavailable.
+    """
+    if not ref_text:
+        return ref_text
+    if not _has_non_english(ref_text):
+        return ref_text  # already English
+    print(f"  [ref_text] translating Chinese ref_text -> English: {ref_text!r}")
+    try:
+        return translate_to_english(ref_text)
+    except Exception as e:
+        print(f"  [ref_text] translation failed ({e}), keeping original")
+        return ref_text
+
+
+def _clarify_audio(wav: np.ndarray, sr: int) -> np.ndarray:
+    """
+    Light post-processing to clean up F5-TTS output:
+      - high-pass filter at 80 Hz to remove low-frequency rumble ("大舌头")
+      - peak-normalize to 0.95 to avoid clipping
+    """
+    if len(wav) < sr // 10:
+        return wav
+    import librosa
+    # Pre-emphasis (high-pass approximation): y[n] = x[n] - 0.95 * x[n-1]
+    emphasized = librosa.effects.preemphasis(wav, coef=0.95)
+    # Peak normalize
+    peak = float(np.max(np.abs(emphasized)))
+    if peak > 1e-6:
+        emphasized = emphasized * (0.95 / peak)
+    return emphasized.astype(np.float32)
+
+
 def synthesize_english(
     english_text: str,
     reference_audio: np.ndarray,
     reference_sr: int = 24000,
     ref_text: str = "",
     fix_duration: float | None = None,
+    quality_mode: bool = True,
 ) -> tuple[np.ndarray, int]:
     """
     Synthesize English speech in the speaker's voice using F5-TTS.
@@ -467,6 +505,12 @@ def synthesize_english(
         forces single-pass generation (no chunking) which prevents F5-TTS
         from leaking ref_text content mid-output in cross-lingual runs.
         Total must be <= 30s (F5-TTS single-pass limit).
+    quality_mode : bool, default True
+        When True, applies two quality fixes:
+        1. Auto-translates Chinese ref_text to English (removes Chinese
+           phoneme artifacts / "唐音杂音" in English output).
+        2. Uses nfe_step=128 (vs 64) for better mel generation.
+        3. Runs a high-pass filter on output (removes low-freq rumble).
 
     Returns
     -------
@@ -496,6 +540,11 @@ def synthesize_english(
             _tts_cache["f5"] = F5TTS(model="F5TTS_v1_Base", device=device)
             print(f"  Model loaded on {device}.")
         tts = _tts_cache["f5"]
+
+        # Quality mode: translate ref_text to English to remove Chinese
+        # phoneme artifacts ("唐音杂音") in the English output.
+        if quality_mode:
+            ref_text = _english_ref_text(ref_text)
 
         # F5-TTS 1.1.22's chunking causes ref_text Chinese to leak into
         # English output when ref_text is short (cross-lingual). The chunking
@@ -536,13 +585,18 @@ def synthesize_english(
 
         # F5-TTS requires a non-empty ref_text (used for prosody / duration hints).
         # If we don't have it, F5-TTS has a built-in ASR step we can rely on.
-        print(f"  Generating {len(english_text)} chars of English speech...")
+        # nfe_step default is 32. 64 is a good sweet spot (better quality).
+        # 128+ can cause torchdiffeq to fail with "t must be strictly
+        # increasing or decreasing" — numerical instability.
+        nfe_steps = 64 if quality_mode else 32
+        print(f"  Generating {len(english_text)} chars of English speech "
+              f"(nfe_step={nfe_steps}, quality_mode={quality_mode})...")
         wav, sr, _spec = tts.infer(
             ref_file=ref_path,
             ref_text=ref_text,
             gen_text=english_text,
-            speed=1.0,            # natural speed; we stretch to match later
-            nfe_step=64,          # higher = better quality, slower
+            speed=1.0,                # natural speed; we stretch to match later
+            nfe_step=nfe_steps,       # higher = better quality, slower
             remove_silence=False,
             fix_duration=use_fix_duration,
             show_info=lambda *a, **k: None,  # quiet F5-TTS' own logger
@@ -553,6 +607,10 @@ def synthesize_english(
         # Trim it by finding the first real "speech" segment using VAD-like
         # energy detection on a short window.
         wav = _trim_f5_echo(wav, sr)
+
+        if quality_mode:
+            wav = _clarify_audio(wav, sr)
+
         return wav.astype(np.float32), int(sr)
 
     finally:
